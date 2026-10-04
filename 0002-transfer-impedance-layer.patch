@@ -1,0 +1,739 @@
+From 91804f8f1d063ebfdf09b61ebd1af78e2a8ebeab Mon Sep 17 00:00:00 2001
+From: Graham Seamans <seamansgraham@gmail.com>
+Date: Sun, 4 Oct 2026 11:07:48 -0700
+Subject: [PATCH 2/2] Add transfer-impedance layers on FEM-BEM interfaces
+
+A thin resistive/inertive sheet across an opening (felt, acoustic cloth)
+is two-sided, so it is a property of the interface, not an impedance wall.
+boundary.parameters["transfer_impedance"] = {"model": "resistance_mass",
+"resistance_pa_s_per_m": R, "mass_kg_per_m2": M} on the interface's
+bounded (FEM-side) boundary makes BEAT Engine 0.3.0+ti1 enforce
+p_FEM - p_BEM = (R + i omega M) v_n.
+
+- acoustic_materials: strict parser (all keys required, R, M finite >= 0).
+- physical_compiler: only on interface boundaries in bounded air; assumption.
+- coupled_backend: accept the key on the bounded interface side; refuse it
+  on the one-shot stdin path, which cannot negotiate the worker's
+  interface_transfer_impedance capability (the persistent worker does, via
+  negotiate_submission); fail any result whose diagnostics do not echo the
+  requested layers.
+- System dialog: show the layer on interface rows and keep it on save,
+  instead of silently dropping it; it does not edit it.
+- Tests and docs (Physical System Model, Coupled Solver, Phasor Convention).
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01MXLCRc7E1cDCAXXCEn1VoL
+---
+ docs/Coupled Solver.md              |  14 ++-
+ docs/Physical System Model.md       |  45 +++++++++
+ docs/advanced/Phasor Convention.md  |   1 +
+ src/blab/acoustic_materials.py      |  64 ++++++++++++
+ src/blab/physical_compiler.py       |  22 ++++
+ src/blab/solvers/coupled_backend.py |  72 ++++++++++++-
+ src/blab/ui/system_config.py        |  31 ++++--
+ tests/test_acoustic_materials.py    |  38 +++++++
+ tests/test_physical_compiler.py     | 151 +++++++++++++++++++++++++++-
+ tests/test_ui_system_config.py      |  36 ++++++-
+ 10 files changed, 462 insertions(+), 12 deletions(-)
+
+diff --git a/docs/Coupled Solver.md b/docs/Coupled Solver.md
+index 09196d9..4b6c29a 100644
+--- a/docs/Coupled Solver.md	
++++ b/docs/Coupled Solver.md	
+@@ -235,6 +235,17 @@ or frame elasticity. The UI defaults of 30 mm and 5,000 Pa·s/m² are a useful
+ starting approximation for typical loose loudspeaker cabinet lining, not a
+ material specification.
+ 
++An interface may carry a thin transfer-impedance layer (see
++[Physical System Model](Physical%20System%20Model.md#transfer-impedance-layers)):
++`p_FEM - p_BEM = Z_s v_n` with `Z_s = R + i omega M`. Since
++`q = -i rho omega v_n`, each interface flux row gains a diagonal entry
++`-d q` with `d = Z_s / (-i rho omega) = i R/(rho omega) - M/rho`; there are no
++new unknowns and the FEM Schur condensation is unchanged. The monolithic,
++CUDA/ROCm and condensed `:none`/`:pressure` paths support it; `:flux`
++interface elimination falls back to `:pressure` under `auto` and refuses
++under `on`, and the speaker ROM refuses layers. With `R = M = 0` exactly the
++results are those of plain continuity.
++
+ Only tetrahedra in the selected physical volume groups are retained. Each
+ domain's vertices and facets are compacted, and boundary tags are remapped into
+ a collision-free aggregate namespace before assembly.
+@@ -640,7 +651,8 @@ following are not implemented by the current coupled backend and are normally
+ rejected during application preparation or backend validation:
+ 
+ - general impedance boundary kinds or arbitrary impedance functions (the Miki
+-  rigid-backed treatment on bounded rigid walls is supported);
++  rigid-backed treatment on bounded rigid walls and resistance-mass
++  transfer-impedance layers on FEM-BEM interfaces are supported);
+ - spatially varying acoustic material loss within one FEM region (one
+   homogeneous bulk-loss factor per bounded region is supported);
+ - `Mms` input or automatic conversion from conventional T/S parameter sets;
+diff --git a/docs/Physical System Model.md b/docs/Physical System Model.md
+index c10cfcf..54e6e2a 100644
+--- a/docs/Physical System Model.md	
++++ b/docs/Physical System Model.md	
+@@ -233,6 +233,51 @@ $$
+ Coordinate matching alone is not sufficient. The coupled solver must also
+ transfer quantities correctly between the FEM and BEM basis spaces.
+ 
++### Transfer-impedance layers
++
++A thin resistive sheet across an opening (felt, acoustic cloth, a fine screen)
++is a two-sided element, not a one-sided `impedance` wall. It is a property of
++the interface, set on the interface's bounded (FEM-side) boundary:
++
++```json
++{
++  "id": "boundary:fem-port",
++  "kind": "interface",
++  "parameters": {
++    "transfer_impedance": {
++      "model": "resistance_mass",
++      "resistance_pa_s_per_m": 125.0,
++      "mass_kg_per_m2": 0.004
++    }
++  }
++}
++```
++
++The interface then enforces a pressure jump instead of continuity, with normal
++velocity still continuous:
++
++$$
++p_\mathrm{FEM}-p_\mathrm{BEM}=Z_s\,v_n,\qquad Z_s=R+i\omega M
++$$
++
++in the `exp(+i omega t)` convention, with \(v_n\) along the bounded region's
++outward normal. `R` (Pa·s/m, MKS rayl) and `M` (kg/m²) are referred to the
++interface face area: a sheet that covers only part of the opening, or sits at
++a different plane, must be scaled to it. All three keys are required, both
++values finite and non-negative. Layers on the unbounded side, on non-interface
++boundaries, or with other keys are rejected. The layer is a locally reacting
++sheet: no lateral propagation, no frequency dependence beyond `R + i omega M`,
++no nonlinearity.
++
++Layers need a BEAT Engine that advertises the `interface_transfer_impedance`
++worker capability; an engine without it would ignore the parameter, so the
++submission is refused instead. Each result's diagnostics carry
++`interface_transfer_impedance` (R, M, Z_s per layer) and Boundary Lab fails a
++result that does not echo the requested layers. With a layer present,
++`pressure_continuity_error` is the residual of the jump condition. Headless
++projects set the parameter in the project file; the System dialog shows and
++keeps it but does not edit it.
++
+ An ordinary open port mouth is therefore an interface, not a component. It
+ connects two air domains but does not introduce an independent mechanical
+ device.
+diff --git a/docs/advanced/Phasor Convention.md b/docs/advanced/Phasor Convention.md
+index 9e60a0c..cd443b3 100644
+--- a/docs/advanced/Phasor Convention.md	
++++ b/docs/advanced/Phasor Convention.md	
+@@ -12,6 +12,7 @@ and Deploy use that same convention. Physical frequency and wavenumber are posit
+ | Burton-Miller coupling | `-i/k` |
+ | Passive FEM bulk loss | `K - k^2 M + i eta k^2 M` |
+ | Surface admittance contribution | `+i rho omega Y B` |
++| Interface transfer impedance | `p_FEM - p_BEM = (R + i omega M) v_n` |
+ | Plane-wave termination | `q = -i k p` |
+ | Electrical impedance | `R + i omega L` |
+ | Mechanical impedance | `R + i(omega M - 1/(omega C))` |
+diff --git a/src/blab/acoustic_materials.py b/src/blab/acoustic_materials.py
+index ec8c103..b5be658 100644
+--- a/src/blab/acoustic_materials.py
++++ b/src/blab/acoustic_materials.py
+@@ -9,6 +9,10 @@ REGION_BULK_LOSS_FACTOR_KEY = "bulk_loss_factor"
+ FEM_BULK_LOSS_FACTOR_OPTIONS = (0.0, 0.002, 0.005, 0.01, 0.02, 0.05)
+ WALL_IMPEDANCE_KEY = "wall_impedance"
+ WALL_IMPEDANCE_MODEL_MIKI = "miki"
++TRANSFER_IMPEDANCE_KEY = "transfer_impedance"
++TRANSFER_IMPEDANCE_MODEL_RESISTANCE_MASS = "resistance_mass"
++TRANSFER_IMPEDANCE_RESISTANCE_KEY = "resistance_pa_s_per_m"
++TRANSFER_IMPEDANCE_MASS_KEY = "mass_kg_per_m2"
+ 
+ DEFAULT_WALL_LINING_THICKNESS_M = 0.03
+ DEFAULT_WALL_LINING_FLOW_RESISTIVITY_PA_S_PER_M2 = 5_000.0
+@@ -77,3 +81,63 @@ def miki_wall_impedance_parameters(
+     )
+     assert normalized is not None
+     return {WALL_IMPEDANCE_KEY: normalized}
++
++
++def transfer_impedance_parameters(parameters: Mapping[str, Any] | None) -> dict[str, float | str] | None:
++    """Return a normalized interface transfer-impedance layer, or ``None``.
++
++    The layer is a thin two-sided resistive/inertive sheet across an FEM-BEM
++    interface: ``p_bounded - p_unbounded = (R + i omega M) v_n`` in
++    ``exp(+i omega t)``, with ``v_n`` along the bounded region's outward
++    normal. ``R`` (Pa s/m) and ``M`` (kg/m^2) are referred to the interface
++    face area. Every key is required; unknown keys are refused, matching the
++    engine's parser.
++    """
++
++    if not parameters or TRANSFER_IMPEDANCE_KEY not in parameters:
++        return None
++    raw = parameters[TRANSFER_IMPEDANCE_KEY]
++    if not isinstance(raw, Mapping):
++        raise ValueError("Transfer impedance parameters must be an object.")
++    expected = {"model", TRANSFER_IMPEDANCE_RESISTANCE_KEY, TRANSFER_IMPEDANCE_MASS_KEY}
++    if set(raw) != expected:
++        raise ValueError(
++            "Transfer impedance parameters must have exactly the keys "
++            + ", ".join(sorted(expected))
++            + f"; found {', '.join(sorted(map(str, raw))) or 'none'}."
++        )
++    if raw["model"] != TRANSFER_IMPEDANCE_MODEL_RESISTANCE_MASS:
++        raise ValueError(
++            f"Unsupported transfer impedance model {raw['model']!r}; "
++            f"expected {TRANSFER_IMPEDANCE_MODEL_RESISTANCE_MASS!r}."
++        )
++    values = {}
++    for key in (TRANSFER_IMPEDANCE_RESISTANCE_KEY, TRANSFER_IMPEDANCE_MASS_KEY):
++        value = raw[key]
++        if isinstance(value, bool) or not isinstance(value, (int, float)):
++            raise ValueError(f"Transfer impedance {key} must be a finite non-negative number.")
++        value = float(value)
++        if not math.isfinite(value) or value < 0.0:
++            raise ValueError(f"Transfer impedance {key} must be a finite non-negative number.")
++        values[key] = value
++    return {"model": TRANSFER_IMPEDANCE_MODEL_RESISTANCE_MASS, **values}
++
++
++def resistance_mass_transfer_impedance_parameters(
++    *,
++    resistance_pa_s_per_m: float,
++    mass_kg_per_m2: float = 0.0,
++) -> dict[str, dict[str, float | str]]:
++    """Build normalized boundary parameters for a resistance-mass interface layer."""
++
++    normalized = transfer_impedance_parameters(
++        {
++            TRANSFER_IMPEDANCE_KEY: {
++                "model": TRANSFER_IMPEDANCE_MODEL_RESISTANCE_MASS,
++                TRANSFER_IMPEDANCE_RESISTANCE_KEY: resistance_pa_s_per_m,
++                TRANSFER_IMPEDANCE_MASS_KEY: mass_kg_per_m2,
++            }
++        }
++    )
++    assert normalized is not None
++    return {TRANSFER_IMPEDANCE_KEY: normalized}
+diff --git a/src/blab/physical_compiler.py b/src/blab/physical_compiler.py
+index baaf3f0..c792aba 100644
+--- a/src/blab/physical_compiler.py
++++ b/src/blab/physical_compiler.py
+@@ -17,8 +17,10 @@ from blab.acoustic_impedance import (
+ )
+ from blab.acoustic_materials import (
+     REGION_BULK_LOSS_FACTOR_KEY,
++    TRANSFER_IMPEDANCE_KEY,
+     WALL_IMPEDANCE_KEY,
+     region_bulk_loss_factor,
++    transfer_impedance_parameters,
+     wall_impedance_parameters,
+ )
+ from blab.component_symmetry import (
+@@ -282,6 +284,19 @@ class PhysicalSystemCompiler:
+                     wall_impedance_parameters(boundary.parameters)
+                 except ValueError as exc:
+                     issues.append(f"Boundary '{boundary.id}' {exc}")
++            if TRANSFER_IMPEDANCE_KEY in boundary.parameters:
++                # A two-sided layer across an FEM-BEM interface; the engine reads it on the bounded side only.
++                if region.kind != AcousticRegionKind.BOUNDED_AIR:
++                    issues.append(
++                        f"Boundary '{boundary.id}' transfer impedance belongs on the bounded (FEM) side of an "
++                        "interface, not the unbounded side."
++                    )
++                if boundary.kind != BoundaryKind.INTERFACE:
++                    issues.append(f"Boundary '{boundary.id}' transfer impedance requires an interface assignment.")
++                try:
++                    transfer_impedance_parameters(boundary.parameters)
++                except ValueError as exc:
++                    issues.append(f"Boundary '{boundary.id}' {exc}")
+ 
+         for interface in system.interfaces:
+             bounded = boundaries.get(interface.bounded_boundary_id)
+@@ -858,6 +873,13 @@ class PhysicalSystemCompiler:
+                     "Locally reacting rigid-backed Miki porous wall treatments",
+                 )
+             )
++        if any(transfer_impedance_parameters(boundary.parameters) is not None for boundary in system.boundaries):
++            assumptions.append(
++                PhysicsAssumption(
++                    AssumptionStatus.INCLUDED,
++                    "Locally reacting thin transfer-impedance layers on FEM-BEM interfaces (R + i omega M)",
++                )
++            )
+         if any(boundary.kind == BoundaryKind.PLANE_WAVE_TUBE_TERMINATION for boundary in system.boundaries):
+             assumptions.append(
+                 PhysicsAssumption(
+diff --git a/src/blab/solvers/coupled_backend.py b/src/blab/solvers/coupled_backend.py
+index 2401bfe..701150f 100644
+--- a/src/blab/solvers/coupled_backend.py
++++ b/src/blab/solvers/coupled_backend.py
+@@ -17,8 +17,10 @@ import numpy as np
+ 
+ from blab.acoustic_materials import (
+     REGION_BULK_LOSS_FACTOR_KEY,
++    TRANSFER_IMPEDANCE_KEY,
+     WALL_IMPEDANCE_KEY,
+     region_bulk_loss_factor,
++    transfer_impedance_parameters,
+     wall_impedance_parameters,
+ )
+ from blab.config import DEFAULT_CHANNEL_VOLTAGE_V
+@@ -91,6 +93,53 @@ LUMPED_SEALED_REAR_CHAMBER_PARAMETERS = {
+ }
+ 
+ 
++def requested_transfer_impedances(request: SystemSolveRequest) -> dict[str, dict[str, float | str]]:
++    """Return the request's interface transfer-impedance layers by bounded boundary id."""
++
++    layers = {}
++    for boundary in request.compiled_system.boundaries:
++        layer = transfer_impedance_parameters(boundary.parameters)
++        if layer is not None:
++            layers[boundary.id] = layer
++    return layers
++
++
++def check_transfer_impedance_diagnostics(request: SystemSolveRequest, freq_hz: float, diagnostics: dict) -> None:
++    """Fail unless the engine reports solving exactly the requested transfer-impedance layers.
++
++    The capability negotiation already refuses an engine without the feature; this read-back
++    catches any path that dropped or altered a layer between the request and the matrix.
++    """
++
++    requested = requested_transfer_impedances(request)
++    reported = diagnostics.get("interface_transfer_impedance")
++    if not requested:
++        if reported is not None:
++            raise RuntimeError(
++                f"BEAT reported interface transfer-impedance layers at {freq_hz:g} Hz for a request without any."
++            )
++        return
++    if not isinstance(reported, dict) or not isinstance(reported.get("layers"), list):
++        raise RuntimeError(
++            f"BEAT returned no interface_transfer_impedance diagnostics at {freq_hz:g} Hz although the request "
++            "carries transfer-impedance layers; the engine may have solved without them."
++        )
++    by_boundary = {layer.get("boundary_id"): layer for layer in reported["layers"] if isinstance(layer, dict)}
++    if set(by_boundary) != set(requested) or len(by_boundary) != len(reported["layers"]):
++        raise RuntimeError(
++            f"BEAT solved transfer-impedance layers on {sorted(map(str, by_boundary))} at {freq_hz:g} Hz; "
++            f"requested {sorted(requested)}."
++        )
++    for boundary_id, layer in requested.items():
++        for key in ("resistance_pa_s_per_m", "mass_kg_per_m2"):
++            # The engine echoes the value it solved with, rounded to the solve precision (FP32 in production).
++            if not math.isclose(float(by_boundary[boundary_id].get(key, math.nan)), float(layer[key]), rel_tol=1e-6):
++                raise RuntimeError(
++                    f"BEAT solved boundary '{boundary_id}' with {key} = {by_boundary[boundary_id].get(key)!r} "
++                    f"at {freq_hz:g} Hz; requested {layer[key]!r}."
++                )
++
++
+ class CoupledSession:
+     def __init__(
+         self,
+@@ -158,6 +207,13 @@ class CoupledSession:
+         if self.persistent_worker:
+             yield from self._solve_stream_persistent(stop_requested=stop_requested)
+             return
++        if requested_transfer_impedances(self.request):
++            # The one-shot stdin path never sees the worker's capabilities, so an engine without
++            # transfer-impedance support would solve without the layers instead of failing.
++            raise RuntimeError(
++                "Interface transfer-impedance layers need the persistent BEAT worker, which negotiates the "
++                "interface_transfer_impedance capability; the one-shot solver path cannot check it."
++            )
+ 
+         payload = system_solve_request_to_dict(self.request)
+         command = [self.julia_executable]
+@@ -215,6 +271,7 @@ class CoupledSession:
+                 "Nearly coincident vertices or degenerate triangles can cause this. "
+                 "Try mesh Auto-repair; if cleanup was already attempted, inspect or remesh the affected surfaces."
+             )
++        check_transfer_impedance_diagnostics(self.request, result.freq_hz, result.diagnostics)
+         return result
+ 
+     def _solve_stream_persistent(
+@@ -467,17 +524,28 @@ def validate_coupled_capabilities(request: SystemSolveRequest) -> None:
+     parameterized_boundaries = [
+         boundary.id
+         for boundary in system.boundaries
+-        if boundary.parameters and set(boundary.parameters) != {WALL_IMPEDANCE_KEY}
++        if boundary.parameters
++        and set(boundary.parameters) != {WALL_IMPEDANCE_KEY}
++        and set(boundary.parameters) != {TRANSFER_IMPEDANCE_KEY}
+     ]
+     if parameterized_boundaries:
+         raise ValueError(
+             "Coupled solver does not support the boundary parameters used by: " + ", ".join(parameterized_boundaries)
+         )
++    bounded_interface_boundary_ids = {interface.bounded_boundary_id for interface in system.interfaces}
+     for boundary in system.boundaries:
++        region = region_by_id[boundary.region_id]
++        if transfer_impedance_parameters(boundary.parameters) is not None and (
++            boundary.kind != BoundaryKind.INTERFACE
++            or region.kind != AcousticRegionKind.BOUNDED_AIR
++            or boundary.id not in bounded_interface_boundary_ids
++        ):
++            raise ValueError(
++                f"Transfer impedance boundary '{boundary.id}' must be the bounded (FEM) side of an acoustic interface."
++            )
+         treatment = wall_impedance_parameters(boundary.parameters)
+         if treatment is None:
+             continue
+-        region = region_by_id[boundary.region_id]
+         if boundary.kind != BoundaryKind.RIGID or region.kind != AcousticRegionKind.BOUNDED_AIR:
+             raise ValueError(f"Wall impedance boundary '{boundary.id}' must be rigid and belong to bounded air.")
+     for region in system.regions:
+diff --git a/src/blab/ui/system_config.py b/src/blab/ui/system_config.py
+index 658271e..7d74932 100644
+--- a/src/blab/ui/system_config.py
++++ b/src/blab/ui/system_config.py
+@@ -33,7 +33,9 @@ from PySide6.QtWidgets import (
+ from blab.acoustic_materials import (
+     FEM_BULK_LOSS_FACTOR_OPTIONS,
+     REGION_BULK_LOSS_FACTOR_KEY,
++    TRANSFER_IMPEDANCE_KEY,
+     region_bulk_loss_factor,
++    transfer_impedance_parameters,
+     wall_impedance_parameters,
+ )
+ from blab.component_symmetry import (
+@@ -92,6 +94,19 @@ INTERFACE_SEAM_SIMPLIFICATION_WARNING = (
+ )
+ 
+ 
++def _saved_boundary_parameters(impedance_button, assignment) -> dict:
++    """Boundary parameters the dialog writes back: a wall lining on rigid walls, a layer on interfaces."""
++
++    if not isinstance(impedance_button, QPushButton):
++        return {}
++    parameters = dict(impedance_button.property("boundary_parameters") or {})
++    if assignment == BoundaryKind.RIGID and impedance_button.isEnabled():
++        return {key: value for key, value in parameters.items() if key != TRANSFER_IMPEDANCE_KEY}
++    if assignment == BoundaryKind.INTERFACE and TRANSFER_IMPEDANCE_KEY in parameters:
++        return {TRANSFER_IMPEDANCE_KEY: parameters[TRANSFER_IMPEDANCE_KEY]}
++    return {}
++
++
+ @dataclass(frozen=True)
+ class SystemConfigResult:
+     system: PhysicalSystem
+@@ -722,6 +737,14 @@ class SystemConfigDialog(QDialog):
+ 
+     @staticmethod
+     def _refresh_wall_impedance_button(button: QPushButton, assignment: QComboBox, bounded: bool) -> None:
++        layer = transfer_impedance_parameters(dict(button.property("boundary_parameters") or {}))
++        if layer is not None and assignment.currentData() == BoundaryKind.INTERFACE:
++            # Interface layers are authored in the project file; the dialog shows and keeps them.
++            button.setText(
++                f"Layer {float(layer['resistance_pa_s_per_m']):g} Pa·s/m / {float(layer['mass_kg_per_m2']):g} kg/m²"
++            )
++            button.setEnabled(False)
++            return
+         treatment = wall_impedance_parameters(dict(button.property("boundary_parameters") or {}))
+         button.setText(
+             "None"
+@@ -775,13 +798,7 @@ class SystemConfigDialog(QDialog):
+                     region_id=region_id,
+                     group=PhysicalGroupRef(mesh_id=mesh_id, dimension=2, name=group_name),
+                     kind=BoundaryKind(combo.currentData()),
+-                    parameters=(
+-                        dict(impedance_button.property("boundary_parameters") or {})
+-                        if isinstance(impedance_button, QPushButton)
+-                        and combo.currentData() == BoundaryKind.RIGID
+-                        and impedance_button.isEnabled()
+-                        else {}
+-                    ),
++                    parameters=_saved_boundary_parameters(impedance_button, combo.currentData()),
+                 )
+             )
+         return tuple(boundaries)
+diff --git a/tests/test_acoustic_materials.py b/tests/test_acoustic_materials.py
+index d53097b..44fa195 100644
+--- a/tests/test_acoustic_materials.py
++++ b/tests/test_acoustic_materials.py
+@@ -3,6 +3,8 @@ import pytest
+ from blab.acoustic_materials import (
+     miki_wall_impedance_parameters,
+     region_bulk_loss_factor,
++    resistance_mass_transfer_impedance_parameters,
++    transfer_impedance_parameters,
+     wall_impedance_parameters,
+ )
+ 
+@@ -35,3 +37,39 @@ def test_miki_wall_parameters_use_polyfill_defaults_and_round_trip() -> None:
+ def test_wall_impedance_parameters_reject_invalid_values(parameters) -> None:
+     with pytest.raises(ValueError):
+         wall_impedance_parameters(parameters)
++
++
++def test_transfer_impedance_parameters_normalize_a_resistance_mass_layer() -> None:
++    assert transfer_impedance_parameters({}) is None
++    assert transfer_impedance_parameters({"wall_impedance": {}}) is None
++    parameters = resistance_mass_transfer_impedance_parameters(resistance_pa_s_per_m=125, mass_kg_per_m2=0.004)
++    assert parameters == {
++        "transfer_impedance": {
++            "model": "resistance_mass",
++            "resistance_pa_s_per_m": 125.0,
++            "mass_kg_per_m2": 0.004,
++        }
++    }
++    assert transfer_impedance_parameters(parameters) == parameters["transfer_impedance"]
++
++
++@pytest.mark.parametrize(
++    ("layer", "message"),
++    (
++        ("felt", "must be an object"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": 125.0}, "exactly the keys"),
++        (
++            {"model": "resistance_mass", "resistance_pa_s_per_m": 1.0, "mass_kg_per_m2": 0.0, "area_m2": 1.0},
++            "exactly the keys",
++        ),
++        ({"model": "table", "resistance_pa_s_per_m": 1.0, "mass_kg_per_m2": 0.0}, "Unsupported"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": -1.0, "mass_kg_per_m2": 0.0}, "non-negative"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": float("nan"), "mass_kg_per_m2": 0.0}, "finite"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": 1.0, "mass_kg_per_m2": float("inf")}, "finite"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": True, "mass_kg_per_m2": 0.0}, "number"),
++        ({"model": "resistance_mass", "resistance_pa_s_per_m": "125", "mass_kg_per_m2": 0.0}, "number"),
++    ),
++)
++def test_transfer_impedance_parameters_reject_invalid_layers(layer, message) -> None:
++    with pytest.raises(ValueError, match=message):
++        transfer_impedance_parameters({"transfer_impedance": layer})
+diff --git a/tests/test_physical_compiler.py b/tests/test_physical_compiler.py
+index 1884c8e..d977321 100644
+--- a/tests/test_physical_compiler.py
++++ b/tests/test_physical_compiler.py
+@@ -11,7 +11,7 @@ import pytest
+ from beat_engine import beat_contract
+ 
+ from blab.acoustic_impedance import normalization_records
+-from blab.acoustic_materials import miki_wall_impedance_parameters
++from blab.acoustic_materials import miki_wall_impedance_parameters, resistance_mass_transfer_impedance_parameters
+ from blab.config import ChannelConfig, MeshConfig, RadiatorConfig, SimulationConfig
+ from blab.interface_conform import conform_bem_interface_to_fem
+ from blab.physical_compiler import PhysicalModelCompileError, PhysicalSystemCompiler
+@@ -44,7 +44,9 @@ from blab.solvers.coupled_backend import (
+     DEFAULT_TRANSDUCER_REFERENCE_VOLTAGE_V,
+     CoupledProductionBackend,
+     CoupledReferenceBackend,
++    check_transfer_impedance_diagnostics,
+ )
++from blab.solvers.engine_contract import WorkerCompatibilityError, negotiate_submission
+ from blab.system_contract import (
+     OutputRequest,
+     QuantityResult,
+@@ -514,6 +516,153 @@ def test_coupled_backend_accepts_region_fem_bulk_loss_and_wall_impedance() -> No
+     assert "Locally reacting rigid-backed Miki porous wall treatments" in assumptions
+ 
+ 
++FELT_LAYER = resistance_mass_transfer_impedance_parameters(resistance_pa_s_per_m=125.0, mass_kg_per_m2=0.004)
++
++
++def _fixture_system_with_layer(boundary_id: str = "boundary:fem-interface", parameters=FELT_LAYER):
++    system = _fixture_system()
++    return replace(
++        system,
++        boundaries=tuple(
++            replace(boundary, parameters=parameters) if boundary.id == boundary_id else boundary
++            for boundary in system.boundaries
++        ),
++    )
++
++
++def _layer_request(compiled, frequency_hz: float = 500.0) -> SystemSolveRequest:
++    return SystemSolveRequest(
++        compiled_system=compiled,
++        frequencies_hz=(frequency_hz,),
++        excitation_port_ids=("excitation:radiator",),
++        outputs=(
++            OutputRequest(id="output:fem", quantity="fem_nodal_pressure"),
++            OutputRequest(id="output:velocity", quantity="interface_average_normal_velocity"),
++        ),
++    )
++
++
++def test_coupled_backend_accepts_transfer_impedance_on_the_bounded_interface_boundary() -> None:
++    compiled = PhysicalSystemCompiler().compile(_fixture_system_with_layer())
++    session = CoupledProductionBackend(bem_backend="cpu").create_system_session(_layer_request(compiled))
++
++    boundary = next(
++        boundary for boundary in session.request.compiled_system.boundaries if boundary.id == "boundary:fem-interface"
++    )
++    assert boundary.parameters == FELT_LAYER
++    wire = system_solve_request_to_dict(session.request)
++    wire_boundary = next(
++        boundary for boundary in wire["compiled_system"]["boundaries"] if boundary["id"] == "boundary:fem-interface"
++    )
++    assert wire_boundary["parameters"]["transfer_impedance"] == FELT_LAYER["transfer_impedance"]
++    assumptions = {item.statement for item in compiled.assumptions}
++    assert "Locally reacting thin transfer-impedance layers on FEM-BEM interfaces (R + i omega M)" in assumptions
++
++
++@pytest.mark.parametrize(
++    ("boundary_id", "parameters", "message"),
++    (
++        ("boundary:bem-interface", FELT_LAYER, "bounded \\(FEM\\) side"),
++        ("boundary:wall", FELT_LAYER, "requires an interface assignment"),
++        (
++            "boundary:fem-interface",
++            {"transfer_impedance": {"model": "resistance_mass", "resistance_pa_s_per_m": -1.0, "mass_kg_per_m2": 0.0}},
++            "non-negative",
++        ),
++    ),
++)
++def test_compiler_rejects_misplaced_or_invalid_transfer_impedance(boundary_id, parameters, message) -> None:
++    with pytest.raises(PhysicalModelCompileError, match=message):
++        PhysicalSystemCompiler().compile(_fixture_system_with_layer(boundary_id, parameters))
++
++
++def test_worker_without_the_capability_refuses_a_transfer_impedance_submission() -> None:
++    compiled = PhysicalSystemCompiler().compile(_fixture_system_with_layer())
++    wire = system_solve_request_to_dict(_layer_request(compiled))
++    ready = json.loads((Path(beat_contract.__file__).parent / "worker-v1.json").read_text(encoding="utf-8"))
++    ready["backends"] = {"cpu": {"available": True}}
++    assert "interface_transfer_impedance" in ready["optional_physics"]
++    negotiate_submission(ready, wire, "solve")
++
++    old_engine = {key: value for key, value in ready.items() if key != "optional_physics"}
++    with pytest.raises(WorkerCompatibilityError, match="transfer-impedance layers are unavailable"):
++        negotiate_submission(old_engine, wire, "solve")
++
++
++def test_one_shot_solver_path_refuses_transfer_impedance_before_starting_julia() -> None:
++    compiled = PhysicalSystemCompiler().compile(_fixture_system_with_layer())
++    session = CoupledReferenceBackend(
++        julia_executable="/nonexistent/julia", persistent_worker=False
++    ).create_system_session(_layer_request(compiled))
++
++    with pytest.raises(RuntimeError, match="persistent BEAT worker"):
++        list(session.solve_stream())
++
++
++def test_transfer_impedance_diagnostics_must_echo_the_requested_layers() -> None:
++    layered = _layer_request(PhysicalSystemCompiler().compile(_fixture_system_with_layer()))
++    plain = _layer_request(PhysicalSystemCompiler().compile(_fixture_system()))
++    reported = {
++        "phasor_convention": "exp(+i omega t)",
++        "normal_orientation": "bounded_region_outward",
++        "layers": [
++            {
++                "interface_id": "interface:port",
++                "boundary_id": "boundary:fem-interface",
++                "resistance_pa_s_per_m": 125.0,
++                "mass_kg_per_m2": 0.004,
++                "impedance_real_pa_s_per_m": 125.0,
++                "impedance_imag_pa_s_per_m": 12.566,
++            }
++        ],
++    }
++    check_transfer_impedance_diagnostics(layered, 500.0, {"interface_transfer_impedance": reported})
++    check_transfer_impedance_diagnostics(plain, 500.0, {})
++    with pytest.raises(RuntimeError, match="may have solved without them"):
++        check_transfer_impedance_diagnostics(layered, 500.0, {})
++    with pytest.raises(RuntimeError, match="request without any"):
++        check_transfer_impedance_diagnostics(plain, 500.0, {"interface_transfer_impedance": reported})
++    float32_echo = {**reported, "layers": [{**reported["layers"][0], "mass_kg_per_m2": 0.004000000189989805}]}
++    check_transfer_impedance_diagnostics(layered, 500.0, {"interface_transfer_impedance": float32_echo})
++    altered = {**reported, "layers": [{**reported["layers"][0], "resistance_pa_s_per_m": 0.0}]}
++    with pytest.raises(RuntimeError, match="resistance_pa_s_per_m"):
++        check_transfer_impedance_diagnostics(layered, 500.0, {"interface_transfer_impedance": altered})
++
++
++@pytest.mark.skipif(
++    os.environ.get("BLAB_RUN_COUPLED_REFERENCE") != "1",
++    reason="Set BLAB_RUN_COUPLED_REFERENCE=1 to run the Julia transfer-impedance integration.",
++)
++def test_coupled_solve_with_a_transfer_impedance_layer_reports_it_and_changes_the_port_flow() -> None:
++    julia_executable = os.environ.get("BLAB_JULIA_EXE", "julia")
++    backend = CoupledReferenceBackend(julia_executable=julia_executable)
++    try:
++        plain = list(
++            backend.create_system_session(
++                _layer_request(PhysicalSystemCompiler().compile(_fixture_system()))
++            ).solve_stream()
++        )[0]
++        layered = list(
++            backend.create_system_session(
++                _layer_request(PhysicalSystemCompiler().compile(_fixture_system_with_layer()))
++            ).solve_stream()
++        )[0]
++    finally:
++        shutdown_beat_engine_workers()
++
++    assert "interface_transfer_impedance" not in plain.diagnostics
++    layer = layered.diagnostics["interface_transfer_impedance"]["layers"][0]
++    assert layer["boundary_id"] == "boundary:fem-interface"
++    assert layer["resistance_pa_s_per_m"] == 125.0
++    assert layer["mass_kg_per_m2"] == 0.004
++    # exp(+i omega t): Z_s = R + i omega M.
++    assert layer["impedance_imag_pa_s_per_m"] == pytest.approx(2.0 * np.pi * 500.0 * 0.004)
++    velocity = {quantity.id: quantity for quantity in plain.quantities}["output:velocity"].values
++    damped = {quantity.id: quantity for quantity in layered.quantities}["output:velocity"].values
++    assert np.all(np.isfinite(damped))
++    assert np.abs(damped - velocity).max() > 1e-3 * np.abs(velocity).max()
++
++
+ def test_coupled_backend_rejects_unsupported_physical_roles_before_starting_julia() -> None:
+     compiled = PhysicalSystemCompiler().compile(_fixture_system())
+     wall = next(boundary for boundary in compiled.boundaries if boundary.id == "boundary:wall")
+diff --git a/tests/test_ui_system_config.py b/tests/test_ui_system_config.py
+index 131e701..213068a 100644
+--- a/tests/test_ui_system_config.py
++++ b/tests/test_ui_system_config.py
+@@ -14,7 +14,7 @@ from PySide6.QtWidgets import QApplication, QComboBox, QPushButton
+ import blab.ui.component_editor as component_editor_module
+ import blab.ui.system_config as system_config_module
+ import blab.ui.system_solve as system_solve_module
+-from blab.acoustic_materials import miki_wall_impedance_parameters
++from blab.acoustic_materials import miki_wall_impedance_parameters, resistance_mass_transfer_impedance_parameters
+ from blab.ath import read_surface_physical_names
+ from blab.config import RadiatorConfig
+ from blab.interface_conform import InterfaceConformError, validate_conforming_interfaces
+@@ -1391,6 +1391,40 @@ def test_combined_plane_requests_both_fem_and_bem_spatial_fields() -> None:
+     assert {BEM_BOUNDARY_DOMAIN_ID, FEM_VOLUME_DOMAIN_ID} <= domain_ids
+ 
+ 
++def test_system_dialog_shows_and_keeps_an_interface_transfer_impedance_layer() -> None:
++    dialog = _configured_fixture_dialog()
++    layer = resistance_mass_transfer_impedance_parameters(resistance_pa_s_per_m=125.0, mass_kg_per_m2=0.004)
++    interface_row = next(
++        row
++        for row in range(dialog.boundaries_table.rowCount())
++        if dialog.boundaries_table.item(row, 1).text() == "Interior"
++        and dialog.boundaries_table.item(row, 2).text() == "Interface"
++    )
++    button = dialog.boundaries_table.cellWidget(interface_row, 4)
++    assignment_combo = dialog.boundaries_table.cellWidget(interface_row, 3)
++    assert isinstance(button, QPushButton)
++    assert isinstance(assignment_combo, QComboBox)
++    button.setProperty("boundary_parameters", layer)
++    dialog._refresh_wall_impedance_button(button, assignment_combo, True)
++    assert button.text() == "Layer 125 Pa·s/m / 0.004 kg/m²"
++    assert not button.isEnabled()
++
++    system = dialog.physical_system()
++    boundary = next(
++        boundary
++        for boundary in system.boundaries
++        if boundary.group.name == "Interface"
++        and boundary.region_id in {r.id for r in system.regions if r.kind == AcousticRegionKind.BOUNDED_AIR}
++    )
++    assert boundary.parameters == layer
++
++    # physical_system() rebuilt the table, so fetch the row's combo again.
++    assignment_combo = dialog.boundaries_table.cellWidget(interface_row, 3)
++    assignment_combo.setCurrentIndex(assignment_combo.findData(BoundaryKind.RIGID))
++    rigid = next(b for b in dialog.physical_system().boundaries if b.id == boundary.id)
++    assert rigid.parameters == {}
++
++
+ def test_system_dialog_edits_region_loss_and_rigid_wall_impedance() -> None:
+     dialog = _configured_fixture_dialog()
+     bounded_row = next(
+-- 
+2.43.0
+

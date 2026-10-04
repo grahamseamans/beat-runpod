@@ -2,8 +2,8 @@
 
 **What it is.** A Docker image with all of these installed at build time, under `/opt`:
 - Julia 1.12.6 (x86_64);
-- Boundary Lab at `bb9030c4ae0b5906569b3b3932e221a0c97670ac`, with `beat-engine-0.3.0.patch` applied (it moves the
-  BEAT Engine pin from 0.2.0 to 0.3.0);
+- Boundary Lab at `bb9030c4ae0b5906569b3b3932e221a0c97670ac`, with `0001-pin-beat-engine-ti1.patch` (BEAT Engine pin
+  0.2.0 → fork release 0.3.0+ti1) and `0002-transfer-impedance-layer.patch` applied;
 - the venv;
 - the precompiled Julia depot for both BEAT backends, CPU and CUDA.
 
@@ -17,7 +17,7 @@ every empty volume, which took about 17–20 minutes, mostly Julia precompile on
 | `start.sh` | The container's start command. It writes the env to `/etc/environment` for ssh sessions, starts sshd with `PUBLIC_KEY`, then runs `sleep infinity` under tini. |
 | `.github/workflows/build.yml` | On every push to `main`: build, then push `ghcr.io/<owner>/beat-runpod:<sha>` and `:latest`. |
 | `make-template.sh` | Creates or updates the RunPod pod template through the REST API. |
-| `beat-engine-0.3.0.patch` | A hard link (in the studio repo) to `tools/boundary-lab/beat-engine-0.3.0.patch`, which is the single source. Delete it when upstream Boundary Lab pins BEAT Engine 0.3.0 itself. |
+| `0001-*.patch`, `0002-*.patch` | Hard links (in the studio repo) to `tools/boundary-lab/`, the single source. |
 
 ## Layout inside the image
 

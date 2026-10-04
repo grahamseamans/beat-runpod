@@ -25,7 +25,7 @@ ARG JULIA_VERSION=1.12.6
 # Boundary Lab upstream main on 2026-10-03 (merge of feat/interface-radiation). Same pin as the studio repo's
 # .devcontainer/Dockerfile.
 ARG BLAB_COMMIT=bb9030c4ae0b5906569b3b3932e221a0c97670ac
-ARG BEAT_ENGINE_VERSION=0.3.0
+ARG BEAT_ENGINE_VERSION=0.3.0+ti1
 
 # JULIA_CPU_TARGET=generic: what Boundary Lab's own Dockerfile sets, so the precompiled package images load on any
 #   x86_64 host CPU (RunPod hands out whatever host the GPU sits in).
@@ -85,14 +85,15 @@ RUN curl -fsSL https://julialang-s3.julialang.org/bin/linux/x64/1.12/julia-${JUL
  && ln -s /opt/julia-${JULIA_VERSION}/bin/julia /usr/local/bin/julia \
  && julia --version
 
-# ---- Boundary Lab at the pin, plus the BEAT Engine 0.3.0 patch -----------------------------------------------------
-# The patch moves Boundary Lab's BEAT Engine pin 0.2.0 -> 0.3.0 (wheel URL + sha256, version check, its test).
-# Applied to the working tree so HEAD stays the pin. Its single source is the studio repo's
-# tools/boundary-lab/beat-engine-0.3.0.patch; it goes away when upstream moves its own pin.
-COPY beat-engine-0.3.0.patch /opt/beat-engine-0.3.0.patch
+# ---- Boundary Lab at the pin, plus the local patch series --------------------------------------------------------
+# 0001 moves Boundary Lab's BEAT Engine pin 0.2.0 -> the fork release 0.3.0+ti1 (wheel URL + sha256, version check,
+# its test); 0002 adds interface transfer-impedance layers on Boundary Lab's side. Applied to the working tree so
+# HEAD stays the pin. Their single source is the studio repo's tools/boundary-lab/ (hard links here).
+COPY 0001-pin-beat-engine-ti1.patch 0002-transfer-impedance-layer.patch /opt/blab-patches/
 RUN git clone https://github.com/JWSound/boundary-lab /opt/boundary-lab \
  && git -C /opt/boundary-lab checkout ${BLAB_COMMIT} \
- && git -C /opt/boundary-lab apply /opt/beat-engine-0.3.0.patch
+ && git -C /opt/boundary-lab apply /opt/blab-patches/0001-pin-beat-engine-ti1.patch \
+      /opt/blab-patches/0002-transfer-impedance-layer.patch
 
 # ---- venv ----------------------------------------------------------------------------------------------------------
 # Ubuntu 24.04's python3 is 3.12; Boundary Lab requires >=3.11 (its pyproject.toml). manifold3d is the same pin as
