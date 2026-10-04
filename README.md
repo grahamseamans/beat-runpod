@@ -120,8 +120,9 @@ compressed copies during push, ~12 GB. The free-disk step removes Android, .NET,
    and the preferences. It should be identical at run time (same ENV, same `LocalPreferences.toml`), but if blab's
    worker passes a codegen-affecting flag, packages recompile at the first solve. That would cost minutes, not the
    ~60 s of Julia start and CUDA JIT seen today.
-4. **UNVERIFIED: does the gmsh wheel need more system libraries?** The X libs installed beyond `libglu1-mesa` are a
-   guess. The build-time `import gmsh` either passes or fails loudly.
+4. ~~gmsh system libraries~~ **Answered 2026-10-04:** the first build failed at `import gmsh` with
+   `libGL.so.1: cannot open shared object file`; the apt list is now the full `ldd libgmsh.so` set (see the
+   Dockerfile comment).
 5. **UNVERIFIED: does sshd see the env, and does `PUBLIC_KEY` arrive?**
    - `ssh pod env | grep JULIA` should show the baked vars, through `/etc/environment` and pam_env.
    - Check that RunPod really injects `PUBLIC_KEY` for a custom image (its docs list it as Runpod-provided).

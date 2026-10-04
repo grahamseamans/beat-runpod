@@ -51,16 +51,20 @@ ENV JULIA_DEPOT_PATH=/opt/julia-depot \
 # tini: PID 1 that reaps zombies. Solves are started with nohup from ssh sessions that then exit, so finished solves
 #   are reparented to PID 1; `sleep infinity` would never reap them. Boundary Lab's own image uses tini too.
 #   https://github.com/krallin/tini#why-tini
-# libglu1-mesa + X client libs: what the pip `gmsh` wheel (a Boundary Lab dependency) dlopens. Boundary Lab's image
-#   installs libglu1-mesa (https://github.com/JWSound/boundary-lab/blob/bb9030c4ae0b5906569b3b3932e221a0c97670ac/Dockerfile);
-#   the X libs are the FLTK/X11 client libs libgmsh.so usually links (UNVERIFIED, cheap insurance). The `import gmsh`
-#   in the venv step is the proof: it fails the build if a library is missing. The apt `gmsh` package is NOT
-#   installed: it would be a second gmsh, of another version, beside the pip one Boundary Lab depends on.
+# libgl1/libglu1-mesa + X client libs + fontconfig/freetype: what libgmsh.so in the pip `gmsh` wheel (a Boundary
+#   Lab dependency) links. The list is `ldd libgmsh.so` on the Ubuntu 24.04 gmsh build (GL, GLU, X11/Xrender/
+#   Xcursor/Xfixes/Xext/Xft/Xinerama/Xi, fontconfig, freetype); the nvidia `-base` image carries none of them, and
+#   the first CI build (2026-10-04, run 37218364877) failed at `import gmsh` with "libGL.so.1: cannot open shared
+#   object file" when only libglu1-mesa + a few X libs were installed. Boundary Lab's own image gets libGL
+#   transitively (https://github.com/JWSound/boundary-lab/blob/bb9030c4ae0b5906569b3b3932e221a0c97670ac/Dockerfile).
+#   The `import gmsh` in the venv step stays as the proof: it fails the build if a library is missing. The apt `gmsh`
+#   package is NOT installed: it would be a second gmsh, of another version, beside the pip one.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-server rsync procps tini \
       python3 python3-venv \
-      libglu1-mesa libxrender1 libxcursor1 libxft2 libxinerama1 libgomp1 \
+      libgl1 libglu1-mesa libx11-6 libxrender1 libxcursor1 libxfixes3 libxext6 libxft2 libxinerama1 libxi6 \
+      libfontconfig1 libfreetype6 libgomp1 \
  && rm -rf /var/lib/apt/lists/* \
  # host keys are generated per pod in start.sh: keys baked into a published image would be shared by every pod
  && rm -f /etc/ssh/ssh_host_* \
