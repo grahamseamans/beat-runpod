@@ -7,8 +7,9 @@
 - the venv;
 - the precompiled Julia depot for both BEAT backends, CPU and CUDA.
 
-**Why.** A pod from this image is ready to solve once sshd is up. Before it, `setup-pod.sh` had to install all of
-this on every empty volume, which took about 17–20 minutes, mostly Julia precompile on a network volume.
+**Why.** A pod from this image is ready to solve once sshd is up. Before it, a setup script installed all of this on
+every empty volume, which took about 17–20 minutes, mostly Julia precompile on a network volume. Measured
+2026-10-04: `POST /pods` → ssh in 127 s, CUDA `doctor` 27 s, no install step (`../README.md`).
 
 | File | What |
 |---|---|
@@ -16,7 +17,7 @@ this on every empty volume, which took about 17–20 minutes, mostly Julia preco
 | `start.sh` | The container's start command. It writes the env to `/etc/environment` for ssh sessions, starts sshd with `PUBLIC_KEY`, then runs `sleep infinity` under tini. |
 | `.github/workflows/build.yml` | On every push to `main`: build, then push `ghcr.io/<owner>/beat-runpod:<sha>` and `:latest`. |
 | `make-template.sh` | Creates or updates the RunPod pod template through the REST API. |
-| `beat-engine-0.3.0.patch` | A copy of the studio repo's `tools/boundary-lab/beat-engine-0.3.0.patch`, which is the single source. Delete it when upstream Boundary Lab pins BEAT Engine 0.3.0 itself. |
+| `beat-engine-0.3.0.patch` | A hard link (in the studio repo) to `tools/boundary-lab/beat-engine-0.3.0.patch`, which is the single source. Delete it when upstream Boundary Lab pins BEAT Engine 0.3.0 itself. |
 
 ## Layout inside the image
 
@@ -52,7 +53,10 @@ independent of the driver. The next `using CUDA` then downloads and precompiles 
   toolkit refuse an older host, so the failure is loud.
 - **Proof in the build.** The build fails unless `libcublas.so.12*` and `libcudss.so*` are in the depot.
 
-## Size (estimate; no build has run yet)
+## Size (estimate from before the first build)
+
+Measured on the first pod: `du -sh /opt` = 5.7 GB; the pull and extract took about 90 s.
+
 
 | Layer | Compressed (pushed) | Uncompressed | Source of the number |
 |---|---|---|---|
@@ -90,46 +94,36 @@ compressed copies during push, ~12 GB. The free-disk step removes Android, .NET,
 - **No `PUBLIC_KEY` in the template.** RunPod sets it in every pod from the account's SSH keys, and a pod-level
   `PUBLIC_KEY` replaces it.
 
-## How the studio `pod.sh` would use it (not changed here)
+## How the studio `pod.sh` uses it
 
-**In `pod.sh create`:**
-- `IMAGE` becomes `ghcr.io/<owner>/beat-runpod:<sha>`. Pin the sha, not `:latest`.
-- Alternatively, pass `templateId` from `runpod_template_id`.
-- Add `"allowedCudaVersions": ["12.8", "12.9", "13.0"]` so RunPod only places the pod on hosts whose driver runs
-  CUDA 12.8 (https://docs.runpod.io/api-reference/pods/POST/pods.md). Without it, an old-driver host fails at
-  container start.
+`pod.sh create` passes `templateId` (from `runpod_template_id`) and `"allowedCudaVersions": ["12.8", "12.9", "13.0"]`
+(https://docs.runpod.io/api-reference/pods/POST/pods.md), plus the GPU list, datacenter and network volume. The
+network volume holds only jobs. `run-job.sh` calls `/opt/julia-1.12.6/bin/julia` and sources nothing. See
+`../README.md`.
 
-**Retired:**
-- `setup-pod.sh` and the volume's Julia, clone, venv and depot. The network volume is then needed only for job files
-  and could be dropped for plain `rsync` in and out.
+## Open questions — first build and first pod answered most of them (2026-10-04)
 
-**`env.sh` and `run-job.sh`:**
-- Paths change from `/workspace/julia-1.12.6/bin/julia` to `/opt/julia-1.12.6/bin/julia`, or just `julia`.
-- The env vars are already set in every ssh session, so sourcing `env.sh` becomes unnecessary.
-
-## Open questions — could not be verified without a build or a pod
-
-1. **UNVERIFIED: does the depot need nothing at pod start?** The build-time checks prove cuBLAS and cuDSS are in the
-   depot. They do not prove that no other lazy artifact (for example, one selected on the real GPU's compute
-   capability) or precompile cache is missed.
-   - First pod: run `python -m beat_engine --backend cuda doctor` and watch for downloads or "Precompiling".
-2. **UNVERIFIED: does `JULIA_PKG_OFFLINE=true` make a missing lazy artifact fail?** It is wanted to fail loudly.
-   Pkg's docs only say it "tries to do as much as possible without connecting". If it still downloads, the offline
-   flag is not the guard.
-3. **UNVERIFIED: is the cache valid at run time?** The precompile cache is keyed on the CPU target, the Julia flags
-   and the preferences. It should be identical at run time (same ENV, same `LocalPreferences.toml`), but if blab's
-   worker passes a codegen-affecting flag, packages recompile at the first solve. That would cost minutes, not the
-   ~60 s of Julia start and CUDA JIT seen today.
+1. ~~does the depot need nothing at pod start?~~ **Answered 2026-10-04 (RTX 4090, driver 570.211.01):** yes. The
+   CUDA `doctor` printed no download and no "Precompiling" line (27.0 s first call, 26.9 s second,
+   `"available": true`), and neither did the 18-frequency coupled solve.
+2. **UNVERIFIED: does `JULIA_PKG_OFFLINE=true` make a missing lazy artifact fail?** Not exercised: on the first pod
+   nothing was missing.
+3. ~~is the cache valid at run time?~~ **Answered 2026-10-04:** yes. The blab worker's solve recompiled nothing: no
+   "Precompiling" in `solve.log`, every `.so` in `compiled/` kept its build mtime, and `/` (the container layer) grew
+   by 2 MB. Julia does rewrite the mtime of the `.ji` files it loads (12 of them), which is not a recompile.
 4. ~~gmsh system libraries~~ **Answered 2026-10-04:** the first build failed at `import gmsh` with
    `libGL.so.1: cannot open shared object file`; the apt list is now the full `ldd libgmsh.so` set (see the
    Dockerfile comment).
-5. **UNVERIFIED: does sshd see the env, and does `PUBLIC_KEY` arrive?**
-   - `ssh pod env | grep JULIA` should show the baked vars, through `/etc/environment` and pam_env.
-   - Check that RunPod really injects `PUBLIC_KEY` for a custom image (its docs list it as Runpod-provided).
-6. **UNVERIFIED: does pod start meet ~1 minute?** It depends on how fast RunPod pulls ~3 GB from GHCR and extracts
-   ~8 GB, and on whether hosts cache the image. Measure `create` → ssh up on the first pods.
-7. **UNVERIFIED: does the image count against `containerDiskInGb` (30)?** If it does, 30 GB still leaves ~22 GB.
-8. **UNVERIFIED: does the GitHub runner build fit?** That covers the disk peak and the time a 4-vCPU runner takes for
+5. ~~does sshd see the env, and does `PUBLIC_KEY` arrive?~~ **Answered 2026-10-04:** yes to both. `ssh pod env`
+   (non-interactive) showed `JULIA_DEPOT_PATH=/opt/julia-depot`, `JULIA_CPU_TARGET`, `JULIA_PKG_OFFLINE`,
+   `OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `RUNPOD_POD_ID` (29 lines in `/etc/environment`). With no
+   `PUBLIC_KEY` in the template or the pod request, RunPod injected the account's 5 keys and ssh worked.
+6. ~~does pod start meet ~1 minute?~~ **Answered 2026-10-04:** no, about 2. Container start (pull + extract) 93 s
+   after `POST /pods`, ssh 127 s. One sample, on a host that had probably not cached the image.
+7. ~~does the image count against `containerDiskInGb` (30)?~~ **Answered 2026-10-04:** no. `/` showed 30 GB size with
+   16 MB used while `/opt` held 5.7 GB.
+8. ~~does the GitHub runner build fit?~~ **Answered 2026-10-04:** yes, run 37218910088 built and pushed it (its
+   `df -h` and duration were not read). That covered the disk peak and the time a 4-vCPU runner takes for
    the CUDA precompile (`timeout-minutes: 120`). The workflow logs `df -h` before and after.
 9. **UNVERIFIED: is CUDA 12.8 the right runtime pin?** It is upstream's choice. The runtime pin and the base tag
    (12.8.2) must move together. A lower pin (e.g. 12.4) would admit older-driver hosts. A higher one would need

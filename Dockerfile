@@ -23,7 +23,7 @@ FROM --platform=linux/amd64 ${BASE_IMAGE}
 
 ARG JULIA_VERSION=1.12.6
 # Boundary Lab upstream main on 2026-10-03 (merge of feat/interface-radiation). Same pin as the studio repo's
-# tools/runpod/setup-pod.sh and .devcontainer/Dockerfile.
+# .devcontainer/Dockerfile.
 ARG BLAB_COMMIT=bb9030c4ae0b5906569b3b3932e221a0c97670ac
 ARG BEAT_ENGINE_VERSION=0.3.0
 
