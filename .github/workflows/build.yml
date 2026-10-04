@@ -1,0 +1,69 @@
+# Build the image on every push to main and push it to GHCR as :<sha> and :latest.
+# Pattern: https://docs.github.com/en/actions/use-cases-and-examples/publishing-packages/publishing-docker-images
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write   # GITHUB_TOKEN may push to this repo owner's ghcr.io namespace
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest   # x64, 4 vCPU, 16 GB RAM, 14 GB SSD (https://docs.github.com/en/actions/reference/runners/github-hosted-runners)
+    timeout-minutes: 120
+    steps:
+      # The image is ~8 GB uncompressed (~3 GB pushed; README "Size"). BuildKit holds the extracted layers plus their
+      # compressed copies while pushing, ~12 GB at peak, against 14 GB nominal. Removing the preinstalled Android SDK,
+      # .NET, GHC and CodeQL frees roughly 25-30 GB; the paths are the ones jlumbroso/free-disk-space removes
+      # (https://github.com/jlumbroso/free-disk-space/blob/main/action.yml). df before/after goes in the log.
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - uses: actions/checkout@v4
+
+      # GHCR repository names must be lowercase; the owner may not be.
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/beat-runpod" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Registry cache: a push that changes only start.sh (the last layer) reuses the multi-GB depot layers instead of
+      # re-running the ~20 min Julia instantiate. https://docs.docker.com/build/cache/backends/registry/
+      # org.opencontainers.image.source links the GHCR package to this repo.
+      # https://docs.github.com/en/packages/learn-github-packages/connecting-a-repository-to-a-package
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max
+
+      - name: Disk after build
+        if: always()
+        run: df -h /
