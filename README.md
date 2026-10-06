@@ -2,10 +2,12 @@
 
 **What it is.** A Docker image with all of these installed at build time, under `/opt`:
 - Julia 1.12.6 (x86_64);
-- Boundary Lab at `bb9030c4ae0b5906569b3b3932e221a0c97670ac`, with `0001-pin-beat-engine-ti1.patch` (BEAT Engine pin
-  0.2.0 → fork release 0.3.0+ti1) and `0002-transfer-impedance-layer.patch` applied;
+- Boundary Lab at `bb9030c4ae0b5906569b3b3932e221a0c97670ac`, with `0001-pin-beat-engine-ti2.patch` (BEAT Engine pin
+  0.2.0 → fork release 0.3.0+ti2) and `0002-transfer-impedance-layer.patch` applied;
 - the venv;
-- the precompiled Julia depot for both BEAT backends, CPU and CUDA.
+- the precompiled Julia depot for both BEAT backends, CPU and CUDA. Since 0.3.0+ti2 the coupled engine lives in the
+  backend bundles (`BeatEngineCpuBundle`, `BeatEngineCudaBundle`) with a precompile workload, so the build caches the
+  engine and its coupled call graph instead of every worker compiling them from source.
 
 **Why.** A pod from this image is ready to solve once sshd is up. Before it, a setup script installed all of this on
 every empty volume, which took about 17–20 minutes, mostly Julia precompile on a network volume. Measured
@@ -16,6 +18,7 @@ every empty volume, which took about 17–20 minutes, mostly Julia precompile on
 | `Dockerfile` | The image. Every non-obvious line has its source in a comment. |
 | `start.sh` | The container's start command. It writes the env to `/etc/environment` for ssh sessions, starts sshd with `PUBLIC_KEY`, then runs `sleep infinity` under tini. |
 | `.github/workflows/build.yml` | On every push to `main`: build, then push `ghcr.io/<owner>/beat-runpod:<sha>` and `:latest`. |
+| `beat-workload.sh` | Build check: fails unless a bundle's coupled precompile workload recorded "solved" (`CoupledWorker.WORKLOAD[]`). |
 | `make-template.sh` | Creates or updates the RunPod pod template through the REST API. |
 | `0001-*.patch`, `0002-*.patch` | Hard links (in the studio repo) to `tools/boundary-lab/`, the single source. |
 
@@ -27,10 +30,12 @@ every empty volume, which took about 17–20 minutes, mostly Julia precompile on
 | `/opt/boundary-lab/` | The clone, patched in the working tree. |
 | `/opt/blab-venv/` | The venv. `blab` is symlinked into `/usr/local/bin`. |
 | `/opt/julia-depot/` | `JULIA_DEPOT_PATH`. Holds the CPU and CUDA environments, the CUDA 12.8 runtime artifacts and the precompile caches. |
+| `/opt/beat-workload.sh` | The build check above. |
 | `/opt/beat-cpu-doctor.json` | The CPU worker's `doctor` output from build time. |
 
 **Environment variables baked in:**
-- `JULIA_CPU_TARGET=generic`;
+- `JULIA_CPU_TARGET='generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1);x86-64-v4,-rdrnd,base(1)'`, the
+  official Julia binaries' x86_64 list. Plain `generic` would make the now-precompiled engine code SSE2-only;
 - `OPENBLAS_NUM_THREADS=8` and `OMP_NUM_THREADS=8`, because inside the pod `nproc` reports the host's cores, not the
   ~9 vCPU it is allotted;
 - `JULIA_PKG_OFFLINE=true`.
@@ -128,6 +133,17 @@ network volume holds only jobs. `run-job.sh` calls `/opt/julia-1.12.6/bin/julia`
 9. **UNVERIFIED: is CUDA 12.8 the right runtime pin?** It is upstream's choice. The runtime pin and the base tag
    (12.8.2) must move together. A lower pin (e.g. 12.4) would admit older-driver hosts. A higher one would need
    `allowedCudaVersions` changed with it.
-10. **UNVERIFIED: is `JULIA_CPU_TARGET=generic` costing speed?** It matches today's pod and upstream. Julia's
-    multi-target string (generic plus haswell plus x86-64-v4 clones) might speed up the CPU paths at the cost of a
-    larger depot. Not measured.
+10. ~~is `JULIA_CPU_TARGET=generic` costing speed?~~ Moot since 0.3.0+ti2: the engine is now precompiled, so the
+    image uses the multi-target list. Depot growth not measured.
+
+## Measurement the next batch must make (0.3.0+ti2 image)
+
+Before (`research/solver-profile-2026-10-05.md`, CUDA, `stacked15core` at 100 Hz): start to "BEAT Engine ready"
+38.6 s, first frequency 50.8 s, mostly single-threaded JIT. On the first solve with the ti2 image, read `solve.log`:
+- **No** `BEAT coupled worker: compiling the engine from source (...)` line and no `Precompiling` line. Either one
+  means the bundle cache was not used and the rest is void.
+- Ready time and first-frequency time, each against 38.6 / 50.8 s. Expected: both well down; the first frequency
+  keeps the CUDA host code and kernel compile, which the CPU-run workload cannot cache. The local CPU after-run gave
+  ready 15.2 → 5.6 s and first-frequency JIT ~29 → ~1.5 s (one run, shared machine).
+- `beat_engine.__version__` = `0.3.0+ti2` on the pod.
+

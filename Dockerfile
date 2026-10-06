@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Boundary Lab + BEAT Engine 0.3.0, CPU and CUDA backends, fully installed at build time, for RunPod GPU pods.
+# Boundary Lab + BEAT Engine 0.3.0+ti2, CPU and CUDA backends, fully installed at build time, for RunPod GPU pods.
 # x86_64 only. A pod from this image is ready to solve once sshd is up: nothing is installed or downloaded at start.
 #
 # Everything lives under /opt, never /workspace: RunPod mounts the pod's (network) volume at /workspace, which would
@@ -25,10 +25,14 @@ ARG JULIA_VERSION=1.12.6
 # Boundary Lab upstream main on 2026-10-03 (merge of feat/interface-radiation). Same pin as the studio repo's
 # .devcontainer/Dockerfile.
 ARG BLAB_COMMIT=bb9030c4ae0b5906569b3b3932e221a0c97670ac
-ARG BEAT_ENGINE_VERSION=0.3.0+ti1
+ARG BEAT_ENGINE_VERSION=0.3.0+ti2
 
-# JULIA_CPU_TARGET=generic: what Boundary Lab's own Dockerfile sets, so the precompiled package images load on any
-#   x86_64 host CPU (RunPod hands out whatever host the GPU sits in).
+# JULIA_CPU_TARGET: the x86_64 target list the official Julia binaries are built with (JuliaCI/julia-buildkite
+#   utilities/build_envs.sh, mirrored in the studio repo's references/compute/). The package images load on any
+#   x86_64 host (RunPod hands out whatever host the GPU sits in) and the loader picks the best clone for the host.
+#   It only affects code written to disk, never the JIT (Julia manual, environment variables). Boundary Lab's own
+#   Dockerfile sets plain `generic`, which was harmless while the BEAT engine was JIT-compiled in every worker; since
+#   0.3.0+ti2 the coupled engine runs from its bundle's package image, and `generic` would mean SSE2-only code.
 #   https://github.com/JWSound/boundary-lab/blob/bb9030c4ae0b5906569b3b3932e221a0c97670ac/Dockerfile
 #   https://docs.julialang.org/en/v1/manual/environment-variables/#JULIA_CPU_TARGET
 # OPENBLAS_NUM_THREADS / OMP_NUM_THREADS=8: inside a RunPod container nproc reports the HOST's cores (96 seen) while
@@ -37,7 +41,7 @@ ARG BEAT_ENGINE_VERSION=0.3.0+ti1
 #   https://github.com/OpenMathLib/OpenBLAS/wiki/Faq#how-can-i-use-openblas-in-multi-threaded-applications
 # These ENV lines reach `docker exec` shells only; ssh sessions get them through /etc/environment, see start.sh.
 ENV JULIA_DEPOT_PATH=/opt/julia-depot \
-    JULIA_CPU_TARGET=generic \
+    JULIA_CPU_TARGET='generic;sandybridge,-xsaveopt,clone_all;haswell,-rdrnd,base(1);x86-64-v4,-rdrnd,base(1)' \
     OPENBLAS_NUM_THREADS=8 \
     OMP_NUM_THREADS=8 \
     PYTHONUNBUFFERED=1 \
@@ -86,13 +90,13 @@ RUN curl -fsSL https://julialang-s3.julialang.org/bin/linux/x64/1.12/julia-${JUL
  && julia --version
 
 # ---- Boundary Lab at the pin, plus the local patch series --------------------------------------------------------
-# 0001 moves Boundary Lab's BEAT Engine pin 0.2.0 -> the fork release 0.3.0+ti1 (wheel URL + sha256, version check,
+# 0001 moves Boundary Lab's BEAT Engine pin 0.2.0 -> the fork release 0.3.0+ti2 (wheel URL + sha256, version check,
 # its test); 0002 adds interface transfer-impedance layers on Boundary Lab's side. Applied to the working tree so
 # HEAD stays the pin. Their single source is the studio repo's tools/boundary-lab/ (hard links here).
-COPY 0001-pin-beat-engine-ti1.patch 0002-transfer-impedance-layer.patch /opt/blab-patches/
+COPY 0001-pin-beat-engine-ti2.patch 0002-transfer-impedance-layer.patch /opt/blab-patches/
 RUN git clone https://github.com/JWSound/boundary-lab /opt/boundary-lab \
  && git -C /opt/boundary-lab checkout ${BLAB_COMMIT} \
- && git -C /opt/boundary-lab apply /opt/blab-patches/0001-pin-beat-engine-ti1.patch \
+ && git -C /opt/boundary-lab apply /opt/blab-patches/0001-pin-beat-engine-ti2.patch \
       /opt/blab-patches/0002-transfer-impedance-layer.patch
 
 # ---- venv ----------------------------------------------------------------------------------------------------------
@@ -106,8 +110,13 @@ RUN python3 -m venv /opt/blab-venv \
 
 # ---- BEAT Engine, CPU backend --------------------------------------------------------------------------------------
 # instantiate = Pkg.instantiate() on the engine's bundled Julia project (beat_engine/__main__.py), which also
-# precompiles it. `doctor` starts the CPU worker once: a build that cannot start the worker fails here.
+# precompiles it. Precompiling BeatEngineCpuBundle runs its coupled precompile workload (one frequency of the
+# engine's reference fixture), which is what removes the first-frequency JIT from every solve. /opt/beat-workload.sh
+# fails the build unless that workload recorded "solved" (a skipped or failed workload only logs during precompile).
+# `doctor` starts the CPU worker once: a build that cannot start the worker fails here.
+COPY --chmod=755 beat-workload.sh /opt/beat-workload.sh
 RUN /opt/blab-venv/bin/python -m beat_engine --backend cpu instantiate \
+ && /opt/beat-workload.sh cpu \
  && /opt/blab-venv/bin/python -m beat_engine --backend cpu doctor > /opt/beat-cpu-doctor.json
 
 # ---- BEAT Engine, CUDA backend, precompiled without a GPU ----------------------------------------------------------
@@ -123,10 +132,13 @@ RUN /opt/blab-venv/bin/python -m beat_engine --backend cpu instantiate \
 # CUDA 12.8 needs driver >= 570.26 (https://docs.nvidia.com/cuda/cuda-toolkit-release-notes/index.html, table 3),
 # which the base image's NVIDIA_REQUIRE_CUDA enforces at container start.
 # The second `instantiate` is BEAT's own entry point, re-run so its CUDA bundle is precompiled with the preference set.
+# The bundle's coupled workload runs on the CPU backend (no GPU here), so it caches the code a CUDA solve shares with
+# the CPU path; the CUDA host code and the kernels still compile in the worker on the first frequency.
 # The `find`s fail the build if the CUDA runtime (cuBLAS) or cuDSS libraries did not land in the depot, i.e. if they
 # would otherwise be fetched at pod start.
 RUN /opt/blab-venv/bin/python /opt/boundary-lab/docker/prepare_cuda.py \
  && /opt/blab-venv/bin/python -m beat_engine --backend cuda instantiate \
+ && /opt/beat-workload.sh cuda \
  && find ${JULIA_DEPOT_PATH}/artifacts -name 'libcublas.so.12*' | grep -q . \
  && find ${JULIA_DEPOT_PATH}/artifacts -name 'libcudss.so*' | grep -q . \
  && rm -rf ${JULIA_DEPOT_PATH}/logs

@@ -1,4 +1,4 @@
-From 91804f8f1d063ebfdf09b61ebd1af78e2a8ebeab Mon Sep 17 00:00:00 2001
+From 577af0e6ef92a00d7a253ec7d555da8e0f276501 Mon Sep 17 00:00:00 2001
 From: Graham Seamans <seamansgraham@gmail.com>
 Date: Sun, 4 Oct 2026 11:07:48 -0700
 Subject: [PATCH 2/2] Add transfer-impedance layers on FEM-BEM interfaces
