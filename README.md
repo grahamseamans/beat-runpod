@@ -147,3 +147,9 @@ Before (`research/solver-profile-2026-10-05.md`, CUDA, `stacked15core` at 100 Hz
   ready 15.2 → 5.6 s and first-frequency JIT ~29 → ~1.5 s (one run, shared machine).
 - `beat_engine.__version__` = `0.3.0+ti2` on the pod.
 
+**Measured 2026-10-07** (A40, row `323a3748c750` = `ed5bb13bba17`'s inputs on ti2; detail in
+`research/solver-profile-2026-10-05.md`, "After precompile"): `beat_engine.__version__` `0.3.0+ti2`; no "compiling
+the engine from source" and no "Precompiling" line; ready 11.4 s (was 38.6), first frequency 27.1 s (was 50.8, a
+different case), wall 47.1 s against 108.6 s for the same inputs on ti1. Container start 122 s, ssh 159 s after
+`POST /pods`.
+
