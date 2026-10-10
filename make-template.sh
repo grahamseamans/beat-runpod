@@ -11,6 +11,9 @@
 set -euo pipefail
 
 IMAGE=${1:?usage: make-template.sh <image ref, e.g. ghcr.io/<owner>/beat-runpod:<sha>>}
+# a moving tag would let a rebuild change what the next pod runs with no record of which image solved what: the
+# template is pinned to a commit tag (40 hex), the one build.yml pushes beside :latest
+[[ $IMAGE =~ :[0-9a-f]{40}$ ]] || { echo "make-template.sh: '$IMAGE' is not pinned to a 40-hex commit tag; pass ghcr.io/<owner>/beat-runpod:<sha>" >&2; exit 1; }
 source "$(dirname "$0")/../secrets.sh"
 KEY_FILE=$SECRETS/runpod_api_key
 ID_FILE=$SECRETS/runpod_template_id
