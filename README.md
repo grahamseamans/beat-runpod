@@ -92,9 +92,9 @@ compressed copies during push, ~12 GB. The free-disk step removes Android, .NET,
 
     ./make-template.sh ghcr.io/<owner>/beat-runpod:<sha>
 
-- **First run.** It creates the template and saves its id in `/workspace/.secrets/runpod_template_id`.
+- **First run.** It creates the template and saves its id in `~/.secrets/runpod_template_id`.
 - **Later runs.** They PATCH that template to the new image.
-- **The key.** It is read only from `/workspace/.secrets/runpod_api_key` and passed to curl through a header file,
+- **The key.** It is read only from `~/.secrets/runpod_api_key` and passed to curl through a header file,
   never through argv.
 - **No `PUBLIC_KEY` in the template.** RunPod sets it in every pod from the account's SSH keys, and a pod-level
   `PUBLIC_KEY` replaces it.

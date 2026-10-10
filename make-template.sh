@@ -6,12 +6,12 @@
 # REST API v1: POST /v1/templates creates; PATCH /v1/templates/{templateId} updates.
 #   https://docs.runpod.io/api-reference/templates/POST/templates.md
 #   https://docs.runpod.io/api-reference/templates/PATCH/templates/templateId.md
-# The API key is read from /workspace/.secrets/runpod_api_key and only ever reaches curl through a header file on a
+# The API key is read from $SECRETS/runpod_api_key (../secrets.sh, the one place) and only ever reaches curl through a header file on a
 # file descriptor (never argv, never stdout). The template id is kept beside it in runpod_template_id.
 set -euo pipefail
 
 IMAGE=${1:?usage: make-template.sh <image ref, e.g. ghcr.io/<owner>/beat-runpod:<sha>>}
-SECRETS=/workspace/.secrets
+source "$(dirname "$0")/../secrets.sh"
 KEY_FILE=$SECRETS/runpod_api_key
 ID_FILE=$SECRETS/runpod_template_id
 API=https://rest.runpod.io/v1
