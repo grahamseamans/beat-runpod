@@ -55,6 +55,8 @@ jobs:
           context: .
           platforms: linux/amd64
           push: true
+          build-args: |
+            IMAGE_COMMIT=${{ github.sha }}
           tags: |
             ${{ steps.image.outputs.name }}:${{ github.sha }}
             ${{ steps.image.outputs.name }}:latest

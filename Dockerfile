@@ -26,6 +26,12 @@ ARG JULIA_VERSION=1.12.6
 # .devcontainer/Dockerfile.
 ARG BLAB_COMMIT=bb9030c4ae0b5906569b3b3932e221a0c97670ac
 ARG BEAT_ENGINE_VERSION=0.3.0+ti2
+# THE IMAGE STAMPS ITSELF: build.yml passes the commit it builds from, and the row that solves on a pod records it
+# (tools/run.py pod_image_commit -> inputs.solver.image). No default: an image built without it is unstamped, and
+# run.py refuses to solve on one. The template runs :latest (USER 2026-10-10: "isn't using latest nice? why not
+# just have the run write down the image it used?"); the stamp is what makes that honest.
+ARG IMAGE_COMMIT
+ENV BEAT_IMAGE_COMMIT=${IMAGE_COMMIT}
 
 # JULIA_CPU_TARGET: the x86_64 target list the official Julia binaries are built with (JuliaCI/julia-buildkite
 #   utilities/build_envs.sh, mirrored in the studio repo's references/compute/). The package images load on any

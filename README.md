@@ -17,7 +17,7 @@ every empty volume, which took about 17–20 minutes, mostly Julia precompile on
 |---|---|
 | `Dockerfile` | The image. Every non-obvious line has its source in a comment. |
 | `start.sh` | The container's start command. It writes the env to `/etc/environment` for ssh sessions, starts sshd with `PUBLIC_KEY`, then runs `sleep infinity` under tini. |
-| `.github/workflows/build.yml` | On every push to `main`: build, then push `ghcr.io/<owner>/beat-runpod:<sha>` and `:latest`. |
+| `.github/workflows/build.yml` | On every push to `main`: build (passing `IMAGE_COMMIT=github.sha`, the image's `BEAT_IMAGE_COMMIT` stamp that every row records), then push `ghcr.io/<owner>/beat-runpod:<sha>` and `:latest`. |
 | `beat-workload.sh` | Build check: fails unless a bundle's coupled precompile workload recorded "solved" (`CoupledWorker.WORKLOAD[]`). |
 | `make-template.sh` | Creates or updates the RunPod pod template through the REST API. |
 | `0001-*.patch`, `0002-*.patch` | Hard links (in the studio repo) to `tools/boundary-lab/`, the single source. |
